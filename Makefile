@@ -24,6 +24,16 @@ cluster-down:
 cluster-logs:
 	docker compose -f docker-compose.yml logs -f
 
+# Run database migrations
+migrate-up:
+	goose -dir db/migrations postgres "$(POSTGRES_DSN)" up
+
+migrate-down:
+	goose -dir db/migrations postgres "$(POSTGRES_DSN)" down
+
+migrate-status:
+	goose -dir db/migrations postgres "$(POSTGRES_DSN)" status
+
 # Kill whatever is running on port 8080
 kill:
 	-lsof -ti:8080 | xargs kill -9 2>/dev/null || true
