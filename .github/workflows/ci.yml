@@ -1,0 +1,202 @@
+name: CI
+
+on:
+    push:
+        branches: [main]
+    pull_request:
+        branches: [main]
+
+concurrency:
+    group: ${{ github.workflow }}-${{ github.ref }}
+    cancel-in-progress: true
+
+env:
+    GO_VERSION: "1.26"
+    POSTGRES_DSN: "postgres://chainpulse:chainpulse@localhost:5432/chainpulse?sslmode=disable"
+    REDIS_ADDR: "localhost:6379"
+    REDIS_PASSWORD: "chainpulse"
+
+jobs:
+    # ─────────────────────────────────────────────────────────
+    # Job 1: Build — does the binary compile?
+    # ─────────────────────────────────────────────────────────
+    build:
+        name: Build
+        runs-on: ubuntu-latest
+
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
+
+            - name: Set up Go
+              uses: actions/setup-go@v5
+              with:
+                  go-version: ${{ env.GO_VERSION }}
+                  cache: true
+
+            - name: Verify dependencies
+              run: go mod verify
+
+            - name: Build binary
+              run: make build
+
+            - name: Upload binary artifact
+              uses: actions/upload-artifact@v4
+              with:
+                  name: chainpulse-binary
+                  path: bin/chainpulse
+                  retention-days: 1
+
+        # ─────────────────────────────────────────────────────────
+    # Job 2: Unit tests — fast, no external dependencies
+    # ─────────────────────────────────────────────────────────
+    lint:
+        name: Lint
+        runs-on: ubuntu-latest
+        needs: [build]
+
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
+
+            - name: Set up Go
+              uses: actions/setup-go@v5
+              with:
+                  go-version: ${{ env.GO_VERSION }}
+                  cache: true
+
+            - name: Run linters
+              uses: golangci/golangci-lint-action@v6
+              with:
+                  version: latest
+    # ─────────────────────────────────────────────────────────
+    # Job 3: Unit tests — fast, no external dependencies
+    # ─────────────────────────────────────────────────────────
+    test-unit:
+        name: Unit Tests
+        runs-on: ubuntu-latest
+        needs: [build, lint]
+
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
+
+            - name: Set up Go
+              uses: actions/setup-go@v5
+              with:
+                  go-version: ${{ env.GO_VERSION }}
+                  cache: true
+
+            - name: Run unit tests
+              run: |
+                  go test ./... \
+                    -count=1 \
+                    -race \
+                    -timeout 60s \
+                    -coverprofile=coverage.out
+
+            - name: Architecture lint tests
+              # Verifies the linter itself catches violations — not just that the
+              # current code passes. This is the meta-test.
+              run: go test ./tools/archlint/... -v -count=1
+
+            - name: Upload coverage report
+              uses: actions/upload-artifact@v4
+              with:
+                  name: coverage-report
+                  path: coverage.out
+                  retention-days: 7
+
+    # ─────────────────────────────────────────────────────────
+    # Job 4: Integration tests — require Postgres + Redis
+    # ─────────────────────────────────────────────────────────
+    test-integration:
+        name: Integration Tests
+        runs-on: ubuntu-latest
+        needs: [test-unit]
+
+        services:
+            postgres:
+                image: postgres:16-alpine
+                env:
+                    POSTGRES_USER: chainpulse
+                    POSTGRES_PASSWORD: chainpulse
+                    POSTGRES_DB: chainpulse
+                ports:
+                    - 5432:5432
+                options: >-
+                    --health-cmd "pg_isready -U chainpulse -d chainpulse"
+                    --health-interval 5s
+                    --health-timeout 5s
+                    --health-retries 10
+
+            redis:
+                image: redis:7-alpine
+                env:
+                    REDIS_PASSWORD: chainpulse
+                ports:
+                    - 6379:6379
+                options: >-
+                    --health-cmd "redis-cli -a chainpulse ping"
+                    --health-interval 5s
+                    --health-timeout 5s
+                    --health-retries 10
+
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
+
+            - name: Set up Go
+              uses: actions/setup-go@v5
+              with:
+                  go-version: ${{ env.GO_VERSION }}
+                  cache: true
+
+            - name: Run database migrations
+              run: |
+                  PGPASSWORD=chainpulse psql \
+                    -h localhost -U chainpulse -d chainpulse \
+                    -f db/migrations.sql
+
+            - name: Run integration tests
+              run: |
+                  go test ./... \
+                    -count=1 \
+                    -race \
+                    -tags=integration \
+                    -timeout 120s
+              env:
+                  POSTGRES_DSN: ${{ env.POSTGRES_DSN }}
+                  REDIS_ADDR: ${{ env.REDIS_ADDR }}
+                  REDIS_PASSWORD: ${{ env.REDIS_PASSWORD }}
+
+    # ─────────────────────────────────────────────────────────
+    # Job 5: Phase  exit gate
+    # All jobs must pass for a PR to merge into main.
+    # ─────────────────────────────────────────────────────────
+    phase-gate:
+        name: Phase Exit Gate
+        runs-on: ubuntu-latest
+        needs: [build, test-unit, test-integration]
+        if: always()
+
+        steps:
+            - name: Check all jobs passed
+              run: |
+                  if [[ "${{ needs.build.result }}" != "success" ]]; then
+                    echo "✗ Build failed"
+                    exit 1
+                  fi
+                  if [[ "${{ needs.test-unit.result }}" != "success" ]]; then
+                    echo "✗ Unit tests failed"
+                    exit 1
+                  fi
+                  if [[ "${{ needs.test-integration.result }}" != "success" ]]; then
+                    echo "✗ Integration tests failed"
+                    exit 1
+                  fi
+                  echo "✓ All checks passed"
+                  echo "✓ Build:              OK"
+                  echo "✓ Lint:               OK"
+                  echo "✓ Unit tests:         OK"
+                  echo "✓ Integration tests:  OK"

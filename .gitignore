@@ -1,0 +1,40 @@
+# Binaries
+bin/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test artifacts
+*.test
+coverage.out
+coverage.html
+
+# Environment
+.env
+*.pem
+certs/
+
+# Build cache
+/tmp/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# ML artifacts (large binary files — use artifact storage)
+ml/models/*.pkl
+ml/models/*.onnx
+ml/models/*.joblib
+
+# Docker volumes (local data)
+postgres_data/
+redis_data/
+
+bin/
