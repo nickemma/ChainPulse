@@ -152,11 +152,11 @@ jobs:
                   go-version: ${{ env.GO_VERSION }}
                   cache: true
 
+            - name: Install goose
+              run: go install github.com/pressly/goose/v3/cmd/goose@latest
+
             - name: Run database migrations
-              run: |
-                  PGPASSWORD=chainpulse psql \
-                    -h localhost -U chainpulse -d chainpulse \
-                    -f db/migrations.sql
+              run: goose -dir db/migrations postgres "${{ env.POSTGRES_DSN }}" up
 
             - name: Run integration tests
               run: |

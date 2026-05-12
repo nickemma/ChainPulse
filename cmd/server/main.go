@@ -10,6 +10,9 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+
+	"github.com/gin-gonic/gin"
+	"github.com/nickemma/chainpulse/shared/config"
 )
 
 func main() {
@@ -19,17 +22,16 @@ func main() {
 }
 
 func run() error {
-	addr := os.Getenv("SERVER_ADDR")
-	if addr == "" {
-		addr = ":8080"
+	cfg, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("config error: %w", err)
 	}
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/health", handleHealth)
+	router := setupRouter(cfg)
 
 	srv := &http.Server{
-		Addr:         addr,
-		Handler:      mux,
+		Addr:         cfg.Server.Addr,
+		Handler:      router,
 		ReadTimeout:  5 * time.Second,
 		WriteTimeout: 10 * time.Second,
 		IdleTimeout:  120 * time.Second,
@@ -42,7 +44,7 @@ func run() error {
 	// Start server in a goroutine so it doesn't block
 	serverErr := make(chan error, 1)
 	go func() {
-		fmt.Printf("ChainPulse listening on %s\n", addr)
+		fmt.Printf("ChainPulse listening on %s\n", cfg.Server.Addr)
 		if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
 			serverErr <- err
 		}
@@ -57,7 +59,7 @@ func run() error {
 	}
 
 	// Graceful shutdown — give in-flight requests 10 seconds to complete
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.Server.ShutdownTimeout)
 	defer cancel()
 
 	if err := srv.Shutdown(ctx); err != nil {
@@ -68,10 +70,15 @@ func run() error {
 	return nil
 }
 
-func handleHealth(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
+func setupRouter(cfg *config.Config) *gin.Engine {
+	router := gin.New()
+	router.Use(gin.Recovery())
 
-	if _, err := fmt.Fprint(w, `{"status":"ok"}`); err != nil {
-		log.Printf("failed to write health response: %v", err)
-	}
+	router.GET("/health", handleHealth)
+
+	return router
+}
+
+func handleHealth(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }

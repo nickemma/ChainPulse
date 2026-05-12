@@ -1,4 +1,4 @@
-.PHONY: all build run test cluster-up cluster-down clean
+.PHONY: all build run test kill cluster-up cluster-down cluster-logs migrate-up migrate-down migrate-status clean
 
 # Build the main node binary
 build:
