@@ -1,9 +1,11 @@
 package config
 
 import (
+	"bufio"
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -16,6 +18,8 @@ type Config struct {
 	Redis    RedisConfig
 	Auth     AuthConfig
 	Policy   PolicyConfig
+	Gateway  GatewayConfig
+	LogLevel string
 }
 
 type ServerConfig struct {
@@ -50,11 +54,32 @@ type PolicyConfig struct {
 	EvalTimeoutMs int
 }
 
+// GatewayConfig tunes the edge controls: rate limiting and idempotency.
+type GatewayConfig struct {
+	// RateLimitRequests is the number of requests allowed per tenant+route
+	// within RateLimitWindow.
+	RateLimitRequests int
+	RateLimitWindow   time.Duration
+
+	// IdempotencyTTL is how long a stored idempotent response is replayed
+	// for duplicate requests carrying the same key.
+	IdempotencyTTL time.Duration
+}
+
 // Load reads configuration from environment variables and returns
 // a validated Config. Returns an error if any required value is missing
 // or malformed — the caller should treat this as fatal.
 func Load() (*Config, error) {
+	// Load a local .env file if one exists. This is a convenience for local
+	// development only — in production, env vars come from the orchestrator or
+	// a secrets manager and no .env file is present. Real environment
+	// variables always win over .env values.
+	loadDotEnv(".env")
+
 	cfg := &Config{}
+
+	// --- Logging ---
+	cfg.LogLevel = getEnvOrDefault("LOG_LEVEL", "info")
 
 	// --- Server ---
 	cfg.Server.Addr = getEnvOrDefault("SERVER_ADDR", ":8080")
@@ -84,7 +109,51 @@ func Load() (*Config, error) {
 	cfg.Policy.CacheRefreshInterval = getDurationOrDefault("POLICY_CACHE_REFRESH", 60*time.Second)
 	cfg.Policy.EvalTimeoutMs = getIntOrDefault("POLICY_EVAL_TIMEOUT_MS", 5)
 
+	// --- Gateway ---
+	cfg.Gateway.RateLimitRequests = getIntOrDefault("RATE_LIMIT_REQUESTS", 100)
+	cfg.Gateway.RateLimitWindow = getDurationOrDefault("RATE_LIMIT_WINDOW", time.Minute)
+	cfg.Gateway.IdempotencyTTL = getDurationOrDefault("IDEMPOTENCY_TTL", 24*time.Hour)
+
 	return cfg, nil
+}
+
+// loadDotEnv reads KEY=VALUE lines from path into the process environment,
+// skipping blank lines and comments. Existing environment variables are never
+// overwritten — a real env var always takes precedence over the file. Missing
+// file is not an error. This intentionally avoids an external dependency.
+func loadDotEnv(path string) {
+	f, err := os.Open(path)
+	if err != nil {
+		return // no .env file is the normal case in production
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, value, found := strings.Cut(line, "=")
+		if !found {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		// Strip an inline comment ("VALUE   # note") on unquoted values, while
+		// preserving a '#' that is part of a quoted value (e.g. a password).
+		if !strings.HasPrefix(value, `"`) && !strings.HasPrefix(value, `'`) {
+			if i := strings.IndexAny(value, " \t"); i >= 0 {
+				if j := strings.Index(value[i:], "#"); j >= 0 {
+					value = value[:i]
+				}
+			}
+		}
+		value = strings.Trim(strings.TrimSpace(value), `"'`)
+		if _, exists := os.LookupEnv(key); !exists {
+			_ = os.Setenv(key, value)
+		}
+	}
 }
 
 // requireEnv returns the value of an environment variable or an error

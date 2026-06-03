@@ -11,8 +11,13 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/gin-gonic/gin"
+	"github.com/nickemma/chainpulse/internal/audit"
+	"github.com/nickemma/chainpulse/internal/auth"
+	"github.com/nickemma/chainpulse/internal/gateway"
+	"github.com/nickemma/chainpulse/internal/policy"
 	"github.com/nickemma/chainpulse/shared/config"
+	"github.com/nickemma/chainpulse/shared/logger"
+	"github.com/nickemma/chainpulse/shared/storage"
 )
 
 func main() {
@@ -27,7 +32,37 @@ func run() error {
 		return fmt.Errorf("config error: %w", err)
 	}
 
-	router := setupRouter(cfg)
+	log := logger.New(logger.ParseLevel(cfg.LogLevel))
+	log.Info("starting chainpulse", "addr", cfg.Server.Addr, "log_level", cfg.LogLevel)
+
+	// --- Infrastructure clients ---
+	// Redis: the client is constructed even if the server is currently
+	// unreachable; the gateway degrades gracefully (in-memory rate limiting,
+	// idempotency bypass) and reports the state on /health.
+	rdb, err := storage.NewRedis(cfg.Redis.Addr, cfg.Redis.Password)
+	if err != nil {
+		return fmt.Errorf("redis init: %w", err)
+	}
+	defer rdb.Close()
+	if pingErr := rdb.Ping(context.Background()); pingErr != nil {
+		log.Warn("redis unreachable at startup — gateway will run degraded", "error", pingErr.Error())
+	}
+
+	// --- Application collaborators ---
+	issuer := auth.NewIssuer(cfg.Auth.JWTSecret, cfg.Auth.AccessTokenTTL, cfg.Auth.RefreshTokenTTL)
+	engine := policy.NewEngine(policy.DefaultRules(),
+		time.Duration(cfg.Policy.EvalTimeoutMs)*time.Millisecond)
+	auditor := audit.NewLogAuditor(log)
+
+	router := gateway.NewRouter(gateway.Deps{
+		Config:  cfg,
+		Logger:  log,
+		Issuer:  issuer,
+		Engine:  engine,
+		Auditor: auditor,
+		Redis:   rdb,
+		Stub:    gateway.NewStubModule(),
+	})
 
 	srv := &http.Server{
 		Addr:         cfg.Server.Addr,
@@ -44,7 +79,7 @@ func run() error {
 	// Start server in a goroutine so it doesn't block
 	serverErr := make(chan error, 1)
 	go func() {
-		fmt.Printf("ChainPulse listening on %s\n", cfg.Server.Addr)
+		log.Info("listening", "addr", cfg.Server.Addr)
 		if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
 			serverErr <- err
 		}
@@ -55,10 +90,10 @@ func run() error {
 	case err := <-serverErr:
 		return fmt.Errorf("server failed to start: %w", err)
 	case sig := <-quit:
-		fmt.Printf("received signal %s, shutting down\n", sig)
+		log.Info("received shutdown signal", "signal", sig.String())
 	}
 
-	// Graceful shutdown — give in-flight requests 10 seconds to complete
+	// Graceful shutdown — give in-flight requests time to complete.
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.Server.ShutdownTimeout)
 	defer cancel()
 
@@ -66,19 +101,6 @@ func run() error {
 		return fmt.Errorf("graceful shutdown failed: %w", err)
 	}
 
-	fmt.Println("server stopped cleanly")
+	log.Info("server stopped cleanly")
 	return nil
-}
-
-func setupRouter(cfg *config.Config) *gin.Engine {
-	router := gin.New()
-	router.Use(gin.Recovery())
-
-	router.GET("/health", handleHealth)
-
-	return router
-}
-
-func handleHealth(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }

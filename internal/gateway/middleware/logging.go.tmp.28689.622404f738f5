@@ -1,0 +1,41 @@
+package middleware
+
+import (
+	"time"
+
+	"github.com/gin-gonic/gin"
+	"github.com/nickemma/chainpulse/internal/policy"
+	"github.com/nickemma/chainpulse/shared/httpx"
+	"github.com/nickemma/chainpulse/shared/logger"
+)
+
+// RequestLog emits one structured log line per request after it completes —
+// the outer edge of the audit trail described in ARCHITECTURE.md. Because this
+// runs around the whole chain, a request that reaches the gateway is logged
+// regardless of what happens inside it, including panics recovered downstream.
+func RequestLog() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		start := time.Now()
+
+		c.Next()
+
+		latency := time.Since(start)
+		log := logger.FromContext(c.Request.Context())
+
+		decision, _ := c.Get(policy.CtxDecisionKey)
+		rule, _ := c.Get(policy.CtxRuleKey)
+		rid, _ := c.Get(httpx.RequestIDKey)
+
+		log.Info("request",
+			"request_id", rid,
+			"method", c.Request.Method,
+			"route", c.FullPath(),
+			"path", c.Request.URL.Path,
+			"status", c.Writer.Status(),
+			"latency_ms", float64(latency.Microseconds())/1000.0,
+			"policy_decision", decision,
+			"policy_rule", rule,
+			"ratelimit_fallback", c.GetBool("ratelimit_fallback"),
+		)
+	}
+}
