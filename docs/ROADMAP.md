@@ -22,10 +22,12 @@ This discipline is why the system has documented failure modes at all. Building 
 | Project structure + CI | ✅ Complete | 1 |
 | Docker compose (Postgres + Redis) | ✅ Complete | 1 |
 | Hexagonal module skeleton (order, inventory, shipment) | ✅ Complete | 1 |
-| Gateway: JWT validation + routing | 🔄 In Progress | 2 |
-| Gateway: Redis rate limiting | ⬜ Not started | 2 |
-| Gateway: Idempotency key enforcement | ⬜ Not started | 2 |
-| Auth + Policy engine (RBAC + ABAC) | ⬜ Not started | 2 |
+| Gateway: JWT validation + routing | ✅ Complete | 2 |
+| Gateway: API key authentication (hashed, rotatable) | ✅ Complete | 2 |
+| Gateway: Redis rate limiting | ✅ Complete | 2 |
+| Gateway: Idempotency key enforcement | ✅ Complete | 2 |
+| Auth + Policy engine (RBAC + ABAC) | ✅ Complete | 2 |
+| Policy versioning in Postgres + cache + reload CLI | ⬜ Not started | 2 |
 | Order module: state machine + Postgres persistence | ⬜ Not started | 3 |
 | Order module: transactional outbox | ⬜ Not started | 3 |
 | Order module: optimistic locking | ⬜ Not started | 3 |

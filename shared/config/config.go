@@ -140,16 +140,24 @@ func loadDotEnv(path string) {
 		}
 		key = strings.TrimSpace(key)
 		value = strings.TrimSpace(value)
-		// Strip an inline comment ("VALUE   # note") on unquoted values, while
-		// preserving a '#' that is part of a quoted value (e.g. a password).
-		if !strings.HasPrefix(value, `"`) && !strings.HasPrefix(value, `'`) {
+		if len(value) > 0 && (value[0] == '"' || value[0] == '\'') {
+			// Quoted value: take everything up to the matching closing quote and
+			// discard the rest of the line (e.g. a trailing inline comment). A
+			// '#' inside the quotes is part of the value (e.g. a password).
+			quote := value[0]
+			if end := strings.IndexByte(value[1:], quote); end >= 0 {
+				value = value[1 : 1+end]
+			} else {
+				value = value[1:] // unterminated quote — keep what follows it
+			}
+		} else {
+			// Unquoted value: strip an inline comment ("VALUE   # note").
 			if i := strings.IndexAny(value, " \t"); i >= 0 {
-				if j := strings.Index(value[i:], "#"); j >= 0 {
-					value = value[:i]
+				if strings.Contains(value[i:], "#") {
+					value = strings.TrimSpace(value[:i])
 				}
 			}
 		}
-		value = strings.Trim(strings.TrimSpace(value), `"'`)
 		if _, exists := os.LookupEnv(key); !exists {
 			_ = os.Setenv(key, value)
 		}

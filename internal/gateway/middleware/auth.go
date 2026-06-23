@@ -11,27 +11,31 @@ import (
 	"github.com/nickemma/chainpulse/shared/logger"
 )
 
-// Authenticate validates the Bearer JWT and attaches the trusted Identity to
-// the request. This is the system's single trust boundary: every downstream
-// component reads identity.FromContext / identity.FromGin and never re-parses
-// a token. An expired token returns 401; a malformed or wrongly-signed token
-// returns 401.
-func Authenticate(issuer *auth.Issuer) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		header := c.GetHeader("Authorization")
-		token, ok := bearerToken(header)
-		if !ok {
-			httpx.Unauthorized(c, "missing or malformed Authorization header")
-			return
-		}
+// HeaderAPIKey is the header partners present their API key in. It is kept
+// distinct from Authorization so the credential type is never ambiguous: a
+// Bearer token is always a JWT, an X-API-Key is always a partner key.
+const HeaderAPIKey = "X-API-Key"
 
-		id, err := issuer.Validate(token)
+// Authenticate establishes the request's trusted Identity, accepting either a
+// Bearer JWT (users) or an X-API-Key (partners). This is the system's single
+// trust boundary: every downstream component reads identity.FromContext /
+// identity.FromGin and never re-parses a credential. Any failure — missing,
+// expired, malformed, revoked — returns 401.
+//
+// keys may be nil (e.g. when no Postgres-backed store is configured), in which
+// case only the JWT path is available and an X-API-Key request is rejected.
+func Authenticate(issuer *auth.Issuer, keys auth.APIKeyResolver) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		id, err := resolveIdentity(c, issuer, keys)
 		if err != nil {
 			switch {
-			case errors.Is(err, auth.ErrExpired):
-				httpx.Unauthorized(c, "token expired")
+			case errors.Is(err, auth.ErrExpired), errors.Is(err, auth.ErrKeyExpired):
+				httpx.Unauthorized(c, "credential expired")
+			case errors.Is(err, errNoCredential):
+				httpx.Unauthorized(c, "missing Authorization or X-API-Key")
 			default:
-				httpx.Unauthorized(c, "invalid token")
+				// Do not disclose whether a key is unknown vs revoked.
+				httpx.Unauthorized(c, "invalid credential")
 			}
 			return
 		}
@@ -48,6 +52,25 @@ func Authenticate(issuer *auth.Issuer) gin.HandlerFunc {
 
 		c.Next()
 	}
+}
+
+// errNoCredential signals that the request carried neither a Bearer token nor
+// an API key — distinct from a credential that was present but invalid.
+var errNoCredential = errors.New("no credential presented")
+
+// resolveIdentity picks the credential path: a Bearer JWT takes precedence; if
+// absent, an X-API-Key is resolved against the store (when one is configured).
+func resolveIdentity(c *gin.Context, issuer *auth.Issuer, keys auth.APIKeyResolver) (identity.Identity, error) {
+	if token, ok := bearerToken(c.GetHeader("Authorization")); ok {
+		return issuer.Validate(token)
+	}
+	if key := c.GetHeader(HeaderAPIKey); key != "" {
+		if keys == nil {
+			return identity.Identity{}, auth.ErrKeyNotFound
+		}
+		return keys.Resolve(c.Request.Context(), key)
+	}
+	return identity.Identity{}, errNoCredential
 }
 
 // bearerToken extracts the token from an "Authorization: Bearer <token>"

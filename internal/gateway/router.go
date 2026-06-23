@@ -26,7 +26,8 @@ type Deps struct {
 	Issuer  *auth.Issuer
 	Engine  *policy.Engine
 	Auditor audit.Auditor
-	Redis   *storage.Redis // always non-nil; calls may fail and degrade
+	Redis   *storage.Redis   // always non-nil; calls may fail and degrade
+	APIKeys auth.APIKeyStore // may be nil when no Postgres store is configured
 	Stub    *StubModule
 }
 
@@ -50,15 +51,34 @@ func NewRouter(d Deps) *gin.Engine {
 	redisLimiter := middleware.NewRedisLimiter(d.Redis)
 	memLimiter := middleware.NewMemoryLimiter()
 
-	// Everything under /v1 (except auth) requires a valid JWT and is rate-limited.
+	// Everything under /v1 (except auth) requires a valid credential (JWT or API
+	// key) and is rate-limited.
 	v1 := router.Group("/v1")
-	v1.Use(middleware.Authenticate(d.Issuer))
+	v1.Use(middleware.Authenticate(d.Issuer, d.APIKeys))
 	v1.Use(middleware.RateLimit(redisLimiter, memLimiter,
 		d.Config.Gateway.RateLimitRequests, d.Config.Gateway.RateLimitWindow))
 
 	registerStubRoutes(v1, d)
+	registerAPIKeyRoutes(v1, d)
 
 	return router
+}
+
+// registerAPIKeyRoutes wires partner-key management (create/rotate/revoke/list),
+// each guarded by a policy.Enforce on the "api_key" resource — only an admin
+// rule allows it. They are no-ops when no key store is configured.
+func registerAPIKeyRoutes(v1 *gin.RouterGroup, d Deps) {
+	if d.APIKeys == nil {
+		return
+	}
+	enforce := func(action policy.Action) gin.HandlerFunc {
+		return policy.Enforce(d.Engine, d.Auditor, action, "api_key", queryResourceExtractor)
+	}
+	h := auth.NewAPIKeyHandler(d.APIKeys)
+	v1.POST("/api-keys", enforce(policy.ActionCreate), h.Create)
+	v1.GET("/api-keys", enforce(policy.ActionRead), h.List)
+	v1.POST("/api-keys/:id/rotate", enforce(policy.ActionUpdate), h.Rotate)
+	v1.DELETE("/api-keys/:id", enforce(policy.ActionDelete), h.Revoke)
 }
 
 // registerStubRoutes wires the placeholder module endpoints, each guarded by a

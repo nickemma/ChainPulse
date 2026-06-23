@@ -48,11 +48,21 @@ func run() error {
 		log.Warn("redis unreachable at startup — gateway will run degraded", "error", pingErr.Error())
 	}
 
+	// Postgres is the system of record for partner API keys (and, in later
+	// phases, policy versions and durable idempotency). Unlike Redis it is not
+	// optional — a failure here is fatal at startup.
+	pool, err := storage.NewPostgres(context.Background(), cfg.Postgres.DSN)
+	if err != nil {
+		return fmt.Errorf("postgres init: %w", err)
+	}
+	defer pool.Close()
+
 	// --- Application collaborators ---
 	issuer := auth.NewIssuer(cfg.Auth.JWTSecret, cfg.Auth.AccessTokenTTL, cfg.Auth.RefreshTokenTTL)
 	engine := policy.NewEngine(policy.DefaultRules(),
 		time.Duration(cfg.Policy.EvalTimeoutMs)*time.Millisecond)
 	auditor := audit.NewLogAuditor(log)
+	apiKeys := auth.NewPostgresAPIKeyStore(pool)
 
 	router := gateway.NewRouter(gateway.Deps{
 		Config:  cfg,
@@ -61,6 +71,7 @@ func run() error {
 		Engine:  engine,
 		Auditor: auditor,
 		Redis:   rdb,
+		APIKeys: apiKeys,
 		Stub:    gateway.NewStubModule(),
 	})
 
